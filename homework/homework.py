@@ -92,3 +92,116 @@
 # {'type': 'cm_matrix', 'dataset': 'train', 'true_0': {"predicted_0": 15562, "predicte_1": 666}, 'true_1': {"predicted_0": 3333, "predicted_1": 1444}}
 # {'type': 'cm_matrix', 'dataset': 'test', 'true_0': {"predicted_0": 15562, "predicte_1": 650}, 'true_1': {"predicted_0": 2490, "predicted_1": 1420}}
 #
+
+import pandas as pd
+import gzip
+import pickle
+import json
+from sklearn.pipeline import Pipeline
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import precision_score, balanced_accuracy_score, recall_score, f1_score, confusion_matrix
+from sklearn.model_selection import GridSearchCV
+import os
+
+def pregunta01():
+    test_data = pd.read_csv("files/input/test_data.csv.zip", compression="zip")
+    train_data = pd.read_csv("files/input/train_data.csv.zip", compression="zip")
+
+    def cleanse(df):
+        df = df.copy()
+        df.rename(columns={'default payment next month': 'default'}, inplace=True)
+        df.drop(columns=['ID'], inplace=True)
+        df.dropna(inplace=True)
+        df = df[(df["EDUCATION"] != 0) & (df["MARRIAGE"] != 0)]
+        df["EDUCATION"] = df["EDUCATION"].apply(lambda x: 4 if x > 4 else x)
+        return df
+
+    test_data = cleanse(test_data)
+    train_data = cleanse(train_data)
+
+    x_train, y_train = train_data.drop(columns=['default']), train_data['default']
+    x_test, y_test = test_data.drop(columns=['default']), test_data['default']
+
+    categorical_features = x_train.select_dtypes(include=['object', 'category']).columns.tolist()
+
+    def build_pipeline(cat_features):
+        preprocessor = ColumnTransformer(
+            transformers=[
+                ('cat', OneHotEncoder(handle_unknown='ignore'), cat_features)
+            ], remainder='passthrough'
+        )
+
+        pipeline = Pipeline(steps=[
+            ('preprocessor', preprocessor),
+            ('classifier', RandomForestClassifier(n_estimators=100, random_state=42))
+        ])
+        return pipeline
+
+    pipeline = build_pipeline(categorical_features)
+
+    def tune_hyperparameters(model, x_train, y_train):
+        param_grid = {
+            'classifier__n_estimators': [200],
+            'classifier__max_depth': [None],
+            'classifier__min_samples_split': [10],
+            'classifier__min_samples_leaf': [1, 2],
+            'classifier__max_features': ['sqrt'],
+        }
+
+        grid_search = GridSearchCV(
+            estimator=model,
+            param_grid=param_grid,
+            cv=10,
+            scoring='balanced_accuracy',
+            n_jobs=-1,
+            refit=True
+        )
+        return grid_search
+
+    grid_search = tune_hyperparameters(pipeline, x_train, y_train)
+    grid_search.fit(x_train, y_train)
+
+    model_path = "./files/models/model.pkl.gz"
+    
+    def save_model(path, model):
+        with gzip.open(path, 'wb') as file:
+            pickle.dump(model, file)
+
+    save_model(model_path, grid_search)
+
+    pred_train, pred_test = grid_search.predict(x_train), grid_search.predict(x_test)
+
+    def compute_metrics(y_actual, y_predicted, dataset_label):
+        return {
+            'type': 'metrics',
+            'dataset': dataset_label,
+            'precision': precision_score(y_actual, y_predicted),
+            'balanced_accuracy': balanced_accuracy_score(y_actual, y_predicted),
+            'recall': recall_score(y_actual, y_predicted),
+            'f1_score': f1_score(y_actual, y_predicted)
+        }
+
+    def compute_confusion_matrix(y_actual, y_predicted, dataset_label):
+        cm = confusion_matrix(y_actual, y_predicted)
+        return {
+            'type': 'cm_matrix',
+            'dataset': dataset_label,
+            'true_0': {"predicted_0": int(cm[0, 0]), "predicted_1": int(cm[0, 1])},
+            'true_1': {"predicted_0": int(cm[1, 0]), "predicted_1": int(cm[1, 1])}
+        }
+
+    results = [
+        compute_metrics(y_train, pred_train, 'train'),
+        compute_metrics(y_test, pred_test, 'test'),
+        compute_confusion_matrix(y_train, pred_train, 'train'),
+        compute_confusion_matrix(y_test, pred_test, 'test')
+    ]
+
+    with open("files/output/metrics.json", "w") as output_file:
+        for result in results:
+            output_file.write(json.dumps(result) + "\n")
+
+if __name__ == "__main__":
+    pregunta01()
